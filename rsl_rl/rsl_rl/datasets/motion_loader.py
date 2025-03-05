@@ -14,16 +14,18 @@ from rsl_rl.datasets import motion_util
 
 class AMPLoader:
 
-    POS_SIZE = 3
-    ROT_SIZE = 4
-    JOINT_POS_SIZE = 12
-    TAR_TOE_POS_LOCAL_SIZE = 12
-    LINEAR_VEL_SIZE = 3
-    ANGULAR_VEL_SIZE = 3
-    JOINT_VEL_SIZE = 12
-    TAR_TOE_VEL_LOCAL_SIZE = 12
+    POS_SIZE = 3 # 根部位置3D坐标
+    ROT_SIZE = 4 # 根部四元数
+    JOINT_POS_SIZE = 16 # 关节数量
+    FEET_POS_LOCAL_SIZE = 6 # 足部目标局部位置 相当于身体的位置 （4 * 3）
+    LINEAR_VEL_SIZE = 3 # 线速度
+    ANGULAR_VEL_SIZE = 3 # 角速度
+    JOINT_VEL_SIZE = 16 # 关节旋转速度
+    FEET_VEL_LOCAL_SIZE = 6 # 足部运动速度
 
+    # 各项数据IDX索引
     ROOT_POS_START_IDX = 0
+
     ROOT_POS_END_IDX = ROOT_POS_START_IDX + POS_SIZE
 
     ROOT_ROT_START_IDX = ROOT_POS_END_IDX
@@ -32,10 +34,10 @@ class AMPLoader:
     JOINT_POSE_START_IDX = ROOT_ROT_END_IDX
     JOINT_POSE_END_IDX = JOINT_POSE_START_IDX + JOINT_POS_SIZE
 
-    TAR_TOE_POS_LOCAL_START_IDX = JOINT_POSE_END_IDX
-    TAR_TOE_POS_LOCAL_END_IDX = TAR_TOE_POS_LOCAL_START_IDX + TAR_TOE_POS_LOCAL_SIZE
+    FEET_POS_LOCAL_START_IDX = JOINT_POSE_END_IDX
+    FEET_POS_LOCAL_END_IDX = FEET_POS_LOCAL_START_IDX + FEET_POS_LOCAL_SIZE
 
-    LINEAR_VEL_START_IDX = TAR_TOE_POS_LOCAL_END_IDX
+    LINEAR_VEL_START_IDX = FEET_POS_LOCAL_END_IDX
     LINEAR_VEL_END_IDX = LINEAR_VEL_START_IDX + LINEAR_VEL_SIZE
 
     ANGULAR_VEL_START_IDX = LINEAR_VEL_END_IDX
@@ -44,8 +46,8 @@ class AMPLoader:
     JOINT_VEL_START_IDX = ANGULAR_VEL_END_IDX
     JOINT_VEL_END_IDX = JOINT_VEL_START_IDX + JOINT_VEL_SIZE
 
-    TAR_TOE_VEL_LOCAL_START_IDX = JOINT_VEL_END_IDX
-    TAR_TOE_VEL_LOCAL_END_IDX = TAR_TOE_VEL_LOCAL_START_IDX + TAR_TOE_VEL_LOCAL_SIZE
+    FEET_VEL_LOCAL_START_IDX = JOINT_VEL_END_IDX
+    FEET_VEL_LOCAL_END_IDX = FEET_VEL_LOCAL_START_IDX + FEET_VEL_LOCAL_SIZE
 
     def __init__(
             self,
@@ -78,13 +80,16 @@ class AMPLoader:
             with open(motion_file, "r") as f:
                 motion_json = json.load(f)
                 motion_data = np.array(motion_json["Frames"])
+                # 将Pybullet格式数据转换为Gym数据
                 motion_data = self.reorder_from_pybullet_to_isaac(motion_data)
 
                 # Normalize and standardize quaternions.
                 for f_i in range(motion_data.shape[0]):
+                    # 标准化 规范化处四元数
                     root_rot = AMPLoader.get_root_rot(motion_data[f_i])
                     root_rot = pose3d.QuaternionNormalize(root_rot)
                     root_rot = motion_util.standardize_quaternion(root_rot)
+                    # 更换源数据中的四元数
                     motion_data[
                         f_i,
                         AMPLoader.POS_SIZE:
@@ -92,45 +97,61 @@ class AMPLoader:
                              AMPLoader.ROT_SIZE)] = root_rot
                 
                 # Remove first 7 observation dimensions (root_pos and root_orn).
+                # 移除前七维数据
                 self.trajectories.append(torch.tensor(
                     motion_data[
                         :,
                         AMPLoader.ROOT_ROT_END_IDX:AMPLoader.JOINT_VEL_END_IDX
                     ], dtype=torch.float32, device=device))
+                # 全部数据
                 self.trajectories_full.append(torch.tensor(
                         motion_data[:, :AMPLoader.JOINT_VEL_END_IDX],
                         dtype=torch.float32, device=device))
+                # 参考轨迹的索引
                 self.trajectory_idxs.append(i)
+                # 参考轨迹的权重
                 self.trajectory_weights.append(
                     float(motion_json["MotionWeight"]))
+                # 时间间隔
                 frame_duration = float(motion_json["FrameDuration"])
                 self.trajectory_frame_durations.append(frame_duration)
+                # 参考轨迹时长
                 traj_len = (motion_data.shape[0] - 1) * frame_duration
                 self.trajectory_lens.append(traj_len)
+                # 参考轨迹帧数
                 self.trajectory_num_frames.append(float(motion_data.shape[0]))
 
             print(f"Loaded {traj_len}s. motion from {motion_file}.")
         
         # Trajectory weights are used to sample some trajectories more than others.
+        # 各参考轨迹的权重比例
         self.trajectory_weights = np.array(self.trajectory_weights) / np.sum(self.trajectory_weights)
+        # 各参考轨迹的时间间隔
         self.trajectory_frame_durations = np.array(self.trajectory_frame_durations)
+        # 各参考轨迹的时长
         self.trajectory_lens = np.array(self.trajectory_lens)
+        # 各参考轨迹的帧数
         self.trajectory_num_frames = np.array(self.trajectory_num_frames)
 
         # Preload transitions.
         self.preload_transitions = preload_transitions
         if self.preload_transitions:
             print(f'Preloading {num_preload_transitions} transitions')
+            # 按照轨迹权重从所有轨迹中采样num个轨迹索引
             traj_idxs = self.weighted_traj_idx_sample_batch(num_preload_transitions)
+            # 为每个采样的轨迹索引随机采样一个时间点
             times = self.traj_time_sample_batch(traj_idxs)
+            # 获取完整状态帧
             self.preloaded_s = self.get_full_frame_at_time_batch(traj_idxs, times)
+            # 计算下一状态
             self.preloaded_s_next = self.get_full_frame_at_time_batch(traj_idxs, times + self.time_between_frames)
             print(f'Finished preloading')
 
-
+        print("motion_file", motion_files)
         self.all_trajectories_full = torch.vstack(self.trajectories_full)
 
     def reorder_from_pybullet_to_isaac(self, motion_data):
+        # 关节顺序变换
         """Convert from PyBullet ordering to Isaac ordering.
 
         Rearranges leg and joint order from PyBullet [FR, FL, RR, RL] to
@@ -144,7 +165,7 @@ class AMPLoader:
         joint_pos = np.hstack([jp_fl, jp_fr, jp_rl, jp_rr])
     
         fp_fr, fp_fl, fp_rr, fp_rl = np.split(
-            AMPLoader.get_tar_toe_pos_local_batch(motion_data), 4, axis=1)
+            AMPLoader.get_feet_pos_local_batch(motion_data), 4, axis=1)
         foot_pos = np.hstack([fp_fl, fp_fr, fp_rl, fp_rr])
 
         lin_vel = AMPLoader.get_linear_vel_batch(motion_data)
@@ -155,13 +176,14 @@ class AMPLoader:
         joint_vel = np.hstack([jv_fl, jv_fr, jv_rl, jv_rr])
 
         fv_fr, fv_fl, fv_rr, fv_rl = np.split(
-            AMPLoader.get_tar_toe_vel_local_batch(motion_data), 4, axis=1)
+            AMPLoader.get_feet_vel_local_batch(motion_data), 4, axis=1)
         foot_vel = np.hstack([fv_fl, fv_fr, fv_rl, fv_rr])
 
         return np.hstack(
             [root_pos, root_rot, joint_pos, foot_pos, lin_vel, ang_vel,
              joint_vel, foot_vel])
 
+    # 轨迹采样
     def weighted_traj_idx_sample(self):
         """Get traj idx via weighted sampling."""
         return np.random.choice(
@@ -173,6 +195,7 @@ class AMPLoader:
             self.trajectory_idxs, size=size, p=self.trajectory_weights,
             replace=True)
 
+    # 轨迹时间采样
     def traj_time_sample(self, traj_idx):
         """Sample random time for traj."""
         subst = self.time_between_frames + self.trajectory_frame_durations[traj_idx]
@@ -185,6 +208,7 @@ class AMPLoader:
         time_samples = self.trajectory_lens[traj_idxs] * np.random.uniform(size=len(traj_idxs)) - subst
         return np.maximum(np.zeros_like(time_samples), time_samples)
 
+    # 球面线性插值
     def slerp(self, val0, val1, blend):
         return (1.0 - blend) * val0 + blend * val1
 
@@ -194,9 +218,9 @@ class AMPLoader:
 
     def get_frame_at_time(self, traj_idx, time):
         """Returns frame for the given trajectory at the specified time."""
-        p = float(time) / self.trajectory_lens[traj_idx]
+        p = float(time) / self.trajectory_lens[traj_idx] # 把指定时间点转换为轨迹上的归一化位置
         n = self.trajectories[traj_idx].shape[0]
-        idx_low, idx_high = int(np.floor(p * n)), int(np.ceil(p * n))
+        idx_low, idx_high = int(np.floor(p * n)), int(np.ceil(p * n)) # 开始时间节点 和 结束时间节点
         frame_start = self.trajectories[traj_idx][idx_low]
         frame_end = self.trajectories[traj_idx][idx_high]
         blend = p * n - idx_low
@@ -276,6 +300,7 @@ class AMPLoader:
             return self.get_full_frame_at_time_batch(traj_idxs, times)
 
     def blend_frame_pose(self, frame0, frame1, blend):
+        # 两帧之间线性插值
         """Linearly interpolate between two frames, including orientation.
 
         Args:
@@ -290,7 +315,7 @@ class AMPLoader:
         root_pos0, root_pos1 = AMPLoader.get_root_pos(frame0), AMPLoader.get_root_pos(frame1)
         root_rot0, root_rot1 = AMPLoader.get_root_rot(frame0), AMPLoader.get_root_rot(frame1)
         joints0, joints1 = AMPLoader.get_joint_pose(frame0), AMPLoader.get_joint_pose(frame1)
-        tar_toe_pos_0, tar_toe_pos_1 = AMPLoader.get_tar_toe_pos_local(frame0), AMPLoader.get_tar_toe_pos_local(frame1)
+        feet_pos_0, feet_pos_1 = AMPLoader.get_feet_pos_local(frame0), AMPLoader.get_feet_pos_local(frame1)
         linear_vel_0, linear_vel_1 = AMPLoader.get_linear_vel(frame0), AMPLoader.get_linear_vel(frame1)
         angular_vel_0, angular_vel_1 = AMPLoader.get_angular_vel(frame0), AMPLoader.get_angular_vel(frame1)
         joint_vel_0, joint_vel_1 = AMPLoader.get_joint_vel(frame0), AMPLoader.get_joint_vel(frame1)
@@ -302,18 +327,19 @@ class AMPLoader:
             motion_util.standardize_quaternion(blend_root_rot),
             dtype=torch.float32, device=self.device)
         blend_joints = self.slerp(joints0, joints1, blend)
-        blend_tar_toe_pos = self.slerp(tar_toe_pos_0, tar_toe_pos_1, blend)
+        blend_feet_pos = self.slerp(feet_pos_0, feet_pos_1, blend)
         blend_linear_vel = self.slerp(linear_vel_0, linear_vel_1, blend)
         blend_angular_vel = self.slerp(angular_vel_0, angular_vel_1, blend)
         blend_joints_vel = self.slerp(joint_vel_0, joint_vel_1, blend)
 
         return torch.cat([
-            blend_root_pos, blend_root_rot, blend_joints, blend_tar_toe_pos,
+            blend_root_pos, blend_root_rot, blend_joints, blend_feet_pos,
             blend_linear_vel, blend_angular_vel, blend_joints_vel])
 
+    # 数据生成器 用于为模型提供训练数据
     def feed_forward_generator(self, num_mini_batch, mini_batch_size):
         """Generates a batch of AMP transitions."""
-        for _ in range(num_mini_batch):
+        for _ in range(num_mini_batch): # 需要生成的小批量数量
             if self.preload_transitions:
                 idxs = np.random.choice(
                     self.preloaded_s.shape[0], size=mini_batch_size)
@@ -327,14 +353,16 @@ class AMPLoader:
                     self.preloaded_s_next[idxs, AMPLoader.ROOT_POS_START_IDX + 2:AMPLoader.ROOT_POS_START_IDX + 3]], dim=-1)
             else:
                 s, s_next = [], []
+                # 按照权重来采样轨迹和时间点
                 traj_idxs = self.weighted_traj_idx_sample_batch(mini_batch_size)
                 times = self.traj_time_sample_batch(traj_idxs)
+                # 对每个采样时间点，获取当前时刻和下一时刻的状态
                 for traj_idx, frame_time in zip(traj_idxs, times):
                     s.append(self.get_frame_at_time(traj_idx, frame_time))
                     s_next.append(
                         self.get_frame_at_time(
                             traj_idx, frame_time + self.time_between_frames))
-                
+                # 将所有采样的状态合并成批量数据
                 s = torch.vstack(s)
                 s_next = torch.vstack(s_next)
             yield s, s_next
@@ -366,11 +394,11 @@ class AMPLoader:
     def get_joint_pose_batch(poses):
         return poses[:, AMPLoader.JOINT_POSE_START_IDX:AMPLoader.JOINT_POSE_END_IDX]
 
-    def get_tar_toe_pos_local(pose):
-        return pose[AMPLoader.TAR_TOE_POS_LOCAL_START_IDX:AMPLoader.TAR_TOE_POS_LOCAL_END_IDX]
+    def get_feet_pos_local(pose):
+        return pose[AMPLoader.FEET_POS_LOCAL_START_IDX:AMPLoader.FEET_POS_LOCAL_END_IDX]
 
-    def get_tar_toe_pos_local_batch(poses):
-        return poses[:, AMPLoader.TAR_TOE_POS_LOCAL_START_IDX:AMPLoader.TAR_TOE_POS_LOCAL_END_IDX]
+    def get_feet_pos_local_batch(poses):
+        return poses[:, AMPLoader.FEET_POS_LOCAL_START_IDX:AMPLoader.FEET_POS_LOCAL_END_IDX]
 
     def get_linear_vel(pose):
         return pose[AMPLoader.LINEAR_VEL_START_IDX:AMPLoader.LINEAR_VEL_END_IDX]
@@ -390,8 +418,8 @@ class AMPLoader:
     def get_joint_vel_batch(poses):
         return poses[:, AMPLoader.JOINT_VEL_START_IDX:AMPLoader.JOINT_VEL_END_IDX]  
 
-    def get_tar_toe_vel_local(pose):
-        return pose[AMPLoader.TAR_TOE_VEL_LOCAL_START_IDX:AMPLoader.TAR_TOE_VEL_LOCAL_END_IDX]
+    def get_feet_vel_local(pose):
+        return pose[AMPLoader.FEET_VEL_LOCAL_START_IDX:AMPLoader.FEET_VEL_LOCAL_END_IDX]
 
-    def get_tar_toe_vel_local_batch(poses):
-        return poses[:, AMPLoader.TAR_TOE_VEL_LOCAL_START_IDX:AMPLoader.TAR_TOE_VEL_LOCAL_END_IDX]
+    def get_feet_vel_local_batch(poses):
+        return poses[:, AMPLoader.FEET_VEL_LOCAL_START_IDX:AMPLoader.FEET_VEL_LOCAL_END_IDX]
