@@ -16,11 +16,11 @@ class AMPLoader:
 
     POS_SIZE = 3 # 根部位置3D坐标
     ROT_SIZE = 4 # 根部四元数
-    JOINT_POS_SIZE = 16 # 关节数量
+    JOINT_POS_SIZE = 12 # 关节数量
     FEET_POS_LOCAL_SIZE = 6 # 足部目标局部位置 相当于身体的位置 （4 * 3）
     LINEAR_VEL_SIZE = 3 # 线速度
     ANGULAR_VEL_SIZE = 3 # 角速度
-    JOINT_VEL_SIZE = 16 # 关节旋转速度
+    JOINT_VEL_SIZE = 12 # 关节旋转速度
     FEET_VEL_LOCAL_SIZE = 6 # 足部运动速度
 
     # 各项数据IDX索引

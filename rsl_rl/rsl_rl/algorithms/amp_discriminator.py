@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.utils.data
 from torch import autograd
+from colorama import Fore, Style
 
 from rsl_rl.utils import utils
 
@@ -23,6 +24,10 @@ class AMPDiscriminator(nn.Module):
             curr_in_dim = hidden_dim
         self.trunk = nn.Sequential(*amp_layers).to(device)
         self.amp_linear = nn.Linear(hidden_layer_sizes[-1], 1).to(device)
+
+        print(f"{Fore.GREEN}Trunk MLP: {self.trunk}{Style.RESET_ALL}")
+        print(f"{Fore.RED}AMP Linear: {self.amp_linear}{Style.RESET_ALL}")
+
 
         self.trunk.train()
         self.amp_linear.train()
@@ -61,11 +66,13 @@ class AMPDiscriminator(nn.Module):
                 next_state = normalizer.normalize_torch(next_state, self.device)
 
             d = self.amp_linear(self.trunk(torch.cat([state, next_state], dim=-1)))
-            reward = self.amp_reward_coef * torch.clamp(1 - (1/4) * torch.square(d - 1), min=0)
+            amp_reward_no_scale = torch.clamp(1 - (1 / 4) * torch.square(d - 1), min=0)
+            amp_reward = self.amp_reward_coef * torch.clamp(1 - (1 / 4) * torch.square(d - 1), min=0)
+            reward = self.amp_reward_coef * torch.clamp(1 - (1 / 4) * torch.square(d - 1), min=0)
             if self.task_reward_lerp > 0:
                 reward = self._lerp_reward(reward, task_reward.unsqueeze(-1))
             self.train()
-        return reward.squeeze(), d
+        return reward.squeeze(), d, amp_reward_no_scale.view(-1), amp_reward.view(-1)
 
     def _lerp_reward(self, disc_r, task_r):
         r = (1.0 - self.task_reward_lerp) * disc_r + self.task_reward_lerp * task_r

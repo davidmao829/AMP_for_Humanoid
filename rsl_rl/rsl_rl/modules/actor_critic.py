@@ -34,6 +34,8 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from torch.nn.modules import rnn
+from colorama import Fore, Style
+
 
 class ActorCritic(nn.Module):
     is_recurrent = False
@@ -79,8 +81,8 @@ class ActorCritic(nn.Module):
                 critic_layers.append(activation)
         self.critic = nn.Sequential(*critic_layers)
 
-        print(f"Actor MLP: {self.actor}")
-        print(f"Critic MLP: {self.critic}")
+        print(f"{Fore.GREEN}Actor MLP: {self.actor}{Style.RESET_ALL}")
+        print(f"{Fore.RED}Critic MLP: {self.critic}{Style.RESET_ALL}")
 
         # Action noise
         self.fixed_std = fixed_std

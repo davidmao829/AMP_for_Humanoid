@@ -1,0 +1,90 @@
+_wandb:
+    value:
+        cli_version: 0.19.8
+        m: []
+        python_version: 3.8.0
+        t:
+            "1":
+                - 1
+                - 55
+            "2":
+                - 1
+                - 55
+            "3":
+                - 13
+                - 16
+                - 23
+                - 35
+                - 55
+                - 61
+            "4": 3.8.0
+            "5": 0.19.8
+            "8":
+                - 5
+            "12": 0.19.8
+            "13": linux-x86_64
+algorithm:
+    value:
+        amp_replay_buffer_size: 1000000
+        clip_param: 0.2
+        desired_kl: 0.01
+        entropy_coef: 0.01
+        gamma: 0.99
+        lam: 0.95
+        learning_rate: 1e-05
+        max_grad_norm: 1
+        num_learning_epochs: 5
+        num_mini_batches: 4
+        schedule: adaptive
+        use_clipped_value_loss: true
+        value_loss_coef: 1
+policy:
+    value:
+        activation: elu
+        actor_hidden_dims:
+            - 512
+            - 256
+            - 128
+        critic_hidden_dims:
+            - 512
+            - 256
+            - 128
+        init_noise_std: 1
+runner:
+    value:
+        algorithm_class_name: AMPPPO
+        amp_discr_hidden_dims:
+            - 1024
+            - 512
+        amp_motion_files:
+            - /home/mao/Github_Project/AMP_for_Humanoid/datasets/mocap_motions_gr1/amp_data.json
+        amp_num_preload_transitions: 2000000
+        amp_reward_coef: 2
+        amp_task_reward_lerp: 0.3
+        checkpoint: -1
+        experiment_name: gr1_amp_example
+        load_run: -1
+        max_iterations: 500000
+        min_normalized_std:
+            - 0.5
+            - 0.5
+            - 0.6
+            - 0.6
+            - 0.3
+            - 0.2
+            - 0.5
+            - 0.5
+            - 0.6
+            - 0.6
+            - 0.3
+            - 0.2
+        num_steps_per_env: 60
+        policy_class_name: ActorCritic
+        resume: false
+        resume_path: null
+        run_name: ""
+        save_interval: 50
+runner_class_name:
+    value: AMPOnPolicyRunner
+seed:
+    value: 1

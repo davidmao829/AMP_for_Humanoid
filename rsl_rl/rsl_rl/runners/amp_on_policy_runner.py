@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -32,17 +32,19 @@ import time
 import os
 from collections import deque
 import statistics
-
+from  datetime import datetime
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import torch
-
+import wandb
 from rsl_rl.algorithms import AMPPPO, PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
 from rsl_rl.algorithms.amp_discriminator import AMPDiscriminator
-from rsl_rl.datasets.motion_loader import AMPLoader
+# from rsl_rl.datasets.motion_loader import AMPLoader
+from rsl_rl.datasets.gr1_motion_loader import GR1_AMPLoader
 from rsl_rl.utils.utils import Normalizer
+
 
 class AMPOnPolicyRunner:
 
@@ -52,26 +54,34 @@ class AMPOnPolicyRunner:
                  log_dir=None,
                  device='cpu'):
 
-        self.cfg=train_cfg["runner"]
+        self.cfg = train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        self.all_cfg = train_cfg
         self.device = device
+        self.wandb_run_name = (
+            datetime.now().strftime("%b%d_%H-%M-%S")
+            + "_"
+            + train_cfg["runner"]["experiment_name"]
+            + "_"
+            + train_cfg["runner"]["run_name"]
+        )
         self.env = env
         if self.env.num_privileged_obs is not None:
-            num_critic_obs = self.env.num_privileged_obs 
+            num_critic_obs = self.env.num_privileged_obs
         else:
             num_critic_obs = self.env.num_obs
-        actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        actor_critic_class = eval(self.cfg["policy_class_name"])  # ActorCritic
         if self.env.include_history_steps is not None:
             num_actor_obs = self.env.num_obs * self.env.include_history_steps
         else:
             num_actor_obs = self.env.num_obs
-        actor_critic: ActorCritic = actor_critic_class( num_actor_obs=num_actor_obs,
-                                                        num_critic_obs=num_critic_obs,
-                                                        num_actions=self.env.num_actions,
-                                                        **self.policy_cfg).to(self.device)
+        actor_critic: ActorCritic = actor_critic_class(num_actor_obs=num_actor_obs,
+                                                       num_critic_obs=num_critic_obs,
+                                                       num_actions=self.env.num_actions,
+                                                       **self.policy_cfg).to(self.device)
 
-        amp_data = AMPLoader(
+        amp_data = GR1_AMPLoader(
             device, time_between_frames=self.env.dt, preload_transitions=True,
             num_preload_transitions=train_cfg['runner']['amp_num_preload_transitions'],
             motion_files=self.cfg["amp_motion_files"])
@@ -83,16 +93,18 @@ class AMPOnPolicyRunner:
             train_cfg['runner']['amp_task_reward_lerp']).to(self.device)
 
         # self.discr: AMPDiscriminator = AMPDiscriminator()
-        alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
+        alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
         min_std = (
-            torch.tensor(self.cfg["min_normalized_std"], device=self.device) *
-            (torch.abs(self.env.dof_pos_limits[:, 1] - self.env.dof_pos_limits[:, 0])))
-        self.alg: PPO = alg_class(actor_critic, discriminator, amp_data, amp_normalizer, device=self.device, min_std=min_std, **self.alg_cfg)
+                torch.tensor(self.cfg["min_normalized_std"], device=self.device) *
+                (torch.abs(self.env.dof_pos_limits[:, 1] - self.env.dof_pos_limits[:, 0])))
+        self.alg: PPO = alg_class(actor_critic, discriminator, amp_data, amp_normalizer, device=self.device,
+                                  min_std=min_std, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [num_actor_obs], [self.env.num_privileged_obs], [self.env.num_actions])
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [num_actor_obs], [self.env.num_privileged_obs],
+                              [self.env.num_actions])
 
         # Log
         self.log_dir = log_dir
@@ -102,19 +114,26 @@ class AMPOnPolicyRunner:
         self.current_learning_iteration = 0
 
         _, _ = self.env.reset()
-    
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+            wandb.init(
+                project="Gr1AMP",
+                sync_tensorboard=True,
+                name=self.wandb_run_name,
+                config=self.all_cfg,
+            )
         if init_at_random_ep_len:
-            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
+            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf,
+                                                             high=int(self.env.max_episode_length))
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
         amp_obs = self.env.get_amp_observations()
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs, amp_obs = obs.to(self.device), critic_obs.to(self.device), amp_obs.to(self.device)
-        self.alg.actor_critic.train() # switch to train mode (for dropout for example)
+        self.alg.actor_critic.train()  # switch to train mode (for dropout for example)
         self.alg.discriminator.train()
 
         ep_infos = []
@@ -123,28 +142,45 @@ class AMPOnPolicyRunner:
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
+        amp_rew_no_scale_buf = deque(maxlen=100)
+        amp_rew_scaled_buf = deque(maxlen=100)
+        cur_task_rew_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_amp_rew_no_scale_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_amp_rew_scaled_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        amp_rew_norm = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
+            amp_rew_norm[:] = 0
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs, amp_obs)
-                    obs, privileged_obs, rewards, dones, infos, reset_env_ids, terminal_amp_states = self.env.step(actions)
+                    if torch.isnan(actions).any() or torch.isinf(actions).any():
+                        nan_indices = torch.isnan(actions).nonzero(as_tuple=True)
+                        if nan_indices[0].numel() > 0:
+                            for i in nan_indices[0]:
+                                # print("nan_indices", nan_indices)
+                                print(f"NaN value at ({i}):\n", actions[i])
+                        print("joint_pos")
+                    obs, privileged_obs, rewards, dones, infos, reset_env_ids, terminal_amp_states = self.env.step(
+                        actions)
                     next_amp_obs = self.env.get_amp_observations()
 
                     critic_obs = privileged_obs if privileged_obs is not None else obs
-                    obs, critic_obs, next_amp_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), next_amp_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                    obs, critic_obs, next_amp_obs, rewards, dones = obs.to(self.device), critic_obs.to(
+                        self.device), next_amp_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
 
                     # Account for terminal states.
                     next_amp_obs_with_term = torch.clone(next_amp_obs)
                     next_amp_obs_with_term[reset_env_ids] = terminal_amp_states
 
-                    rewards = self.alg.discriminator.predict_amp_reward(
-                        amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer)[0]
+                    rewards, _ , amp_rew_no_scale, amp_rew_scaled = self.alg.discriminator.predict_amp_reward(
+                        amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer)
                     amp_obs = torch.clone(next_amp_obs)
                     self.alg.process_env_step(rewards, dones, infos, next_amp_obs_with_term)
-                    
+
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:
@@ -156,14 +192,17 @@ class AMPOnPolicyRunner:
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
+                        amp_rew_norm += amp_rew_no_scale / 0.02
 
+                amp_rew_norm /= self.num_steps_per_env
+                mean_amp_rew_norm = torch.mean(amp_rew_norm)
                 stop = time.time()
                 collection_time = stop - start
 
                 # Learning step
                 start = stop
                 self.alg.compute_returns(critic_obs)
-            
+
             mean_value_loss, mean_surrogate_loss, mean_amp_loss, mean_grad_pen_loss, mean_policy_pred, mean_expert_pred = self.alg.update()
             stop = time.time()
             learn_time = stop - start
@@ -172,7 +211,7 @@ class AMPOnPolicyRunner:
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
-        
+
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
@@ -180,8 +219,8 @@ class AMPOnPolicyRunner:
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs['collection_time'] + locs['learn_time']
         iteration_time = locs['collection_time'] + locs['learn_time']
-
         ep_string = f''
+        wandb_dict = {}
         if locs['ep_infos']:
             for key in locs['ep_infos'][0]:
                 infotensor = torch.tensor([], device=self.device)
@@ -193,33 +232,39 @@ class AMPOnPolicyRunner:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
-                self.writer.add_scalar('Episode/' + key, value, locs['it'])
+                # wandb_dict['Episode_rew/' + key] = value
+                if "tracking" in key:
+                    wandb_dict['Episode_rew_tracking/' + key] = value
+                elif "curriculum" in key:
+                    wandb_dict['Episode_curriculum/' + key] = value
+                else:
+                    wandb_dict['Episode_rew_regularization/' + key] = value
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
+        wandb_dict['Loss/value_func'] = locs['mean_value_loss']
+        wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
 
-        self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
-        self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
-        self.writer.add_scalar('Loss/AMP', locs['mean_amp_loss'], locs['it'])
-        self.writer.add_scalar('Loss/AMP_grad', locs['mean_grad_pen_loss'], locs['it'])
-        self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
-        self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
-        self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
-        self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
-        self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
+        wandb_dict['AMP/loss'] = locs['mean_amp_loss']
+        wandb_dict['AMP/grad_pen_loss'] = locs['mean_grad_pen_loss']
+        wandb_dict['AMP/policy_pred'] = locs['mean_policy_pred']
+        wandb_dict['AMP/expert_pred'] = locs['mean_expert_pred']
+        wandb_dict['AMP/amp_rew_norm'] = locs['mean_amp_rew_norm']
+
+        wandb_dict['Perf/learning_time'] = locs['learn_time']
+        wandb_dict['Policy/mean_noise_std'] = mean_std.item()
+        wandb_dict['Perf/total_fps'] = fps
+        wandb_dict['Perf/collection time'] = locs['collection_time']
         if len(locs['rewbuffer']) > 0:
-            self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
-            self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
-            self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
-            self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
-
+            wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
+            wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
+        wandb.log(wandb_dict, step=locs['it'])
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
-
         if len(locs['rewbuffer']) > 0:
             log_string = (f"""{'#' * width}\n"""
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                              'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'AMP loss:':>{pad}} {locs['mean_amp_loss']:.4f}\n"""
@@ -229,19 +274,18 @@ class AMPOnPolicyRunner:
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                           f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                           f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+            #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+            #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
         else:
             log_string = (f"""{'#' * width}\n"""
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                              'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
-
+            #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+            #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
         log_string += ep_string
         log_string += (f"""{'-' * width}\n"""
                        f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
@@ -251,6 +295,82 @@ class AMPOnPolicyRunner:
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
 
+    # def log(self, locs, width=80, pad=35):
+    #     self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+    #     self.tot_time += locs['collection_time'] + locs['learn_time']
+    #     iteration_time = locs['collection_time'] + locs['learn_time']
+    #
+    #     ep_string = f''
+    #     if locs['ep_infos']:
+    #         for key in locs['ep_infos'][0]:
+    #             infotensor = torch.tensor([], device=self.device)
+    #             for ep_info in locs['ep_infos']:
+    #                 # handle scalar and zero dimensional tensor infos
+    #                 if not isinstance(ep_info[key], torch.Tensor):
+    #                     ep_info[key] = torch.Tensor([ep_info[key]])
+    #                 if len(ep_info[key].shape) == 0:
+    #                     ep_info[key] = ep_info[key].unsqueeze(0)
+    #                 infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+    #             value = torch.mean(infotensor)
+    #             self.writer.add_scalar('Episode/' + key, value, locs['it'])
+    #             ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+    #     mean_std = self.alg.actor_critic.std.mean()
+    #     fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
+    #
+
+    #     self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
+    #     self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
+    #     self.writer.add_scalar('Loss/AMP', locs['mean_amp_loss'], locs['it'])
+    #     self.writer.add_scalar('Loss/AMP_grad', locs['mean_grad_pen_loss'], locs['it'])
+    #     self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
+    #     self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
+    #     self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
+    #     self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
+    #     self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
+    #     if len(locs['rewbuffer']) > 0:
+    #         self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
+    #         self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
+    #         self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
+    #         self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
+    #
+    #     str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+    #
+    #     if len(locs['rewbuffer']) > 0:
+    #         log_string = (f"""{'#' * width}\n"""
+    #                       f"""{str.center(width, ' ')}\n\n"""
+    #                       f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+    #                         'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+    #                       f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+    #                       f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+    #                       f"""{'AMP loss:':>{pad}} {locs['mean_amp_loss']:.4f}\n"""
+    #                       f"""{'AMP grad pen loss:':>{pad}} {locs['mean_grad_pen_loss']:.4f}\n"""
+    #                       f"""{'AMP mean policy pred:':>{pad}} {locs['mean_policy_pred']:.4f}\n"""
+    #                       f"""{'AMP mean expert pred:':>{pad}} {locs['mean_expert_pred']:.4f}\n"""
+    #                       f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+    #                       f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+    #                       f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
+    #                     #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+    #                     #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+    #     else:
+    #         log_string = (f"""{'#' * width}\n"""
+    #                       f"""{str.center(width, ' ')}\n\n"""
+    #                       f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+    #                         'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+    #                       f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+    #                       f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+    #                       f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
+    #                     #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+    #                     #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+    #
+    #     log_string += ep_string
+    #     log_string += (f"""{'-' * width}\n"""
+    #                    f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
+    #                    f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
+    #                    f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
+    #                    f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
+    #                            locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
+    #     print(log_string)
+
     def save(self, path, infos=None):
         torch.save({
             'model_state_dict': self.alg.actor_critic.state_dict(),
@@ -259,7 +379,7 @@ class AMPOnPolicyRunner:
             'amp_normalizer': self.alg.amp_normalizer,
             'iter': self.current_learning_iteration,
             'infos': infos,
-            }, path)
+        }, path)
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
@@ -272,7 +392,7 @@ class AMPOnPolicyRunner:
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):
-        self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
+        self.alg.actor_critic.eval()  # switch to evaluation mode (dropout for example)
         if device is not None:
             self.alg.actor_critic.to(device)
         return self.alg.actor_critic.act_inference
